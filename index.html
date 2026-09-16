@@ -1,0 +1,1393 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AIサンタ 請求書・見積書</title>
+  <meta name="robots" content="noindex, nofollow" />
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script>
+    // ⚠️ 真っ白対策（IERで実証済み）：Babel 8 以降は JSX を import 方式で変換してしまうため、
+    //    従来方式(classic runtime = React.createElement)のプリセットを登録して必ずこれを使わせる。
+    Babel.registerPreset('classic-react', {
+      presets: [[Babel.availablePresets['react'], { runtime: 'classic' }]]
+    });
+  </script>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+JP:wght@400;700&display=swap" rel="stylesheet" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #f5f0eb; }
+    .g2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    .g3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem; }
+    .g4 { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 1rem; }
+    .tbl-wrap { overflow-x: auto; }
+    .hdr-row { display: flex; align-items: center; justify-content: space-between; height: 48px; border-bottom: 1px solid #c8a96e22; gap: 8px; }
+    .nav-row { display: flex; align-items: center; gap: 6px; height: 44px; }
+    .op-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    /* スマホ幅（375px）対応 */
+    @media (max-width: 720px) {
+      .g2, .g3, .g4 { grid-template-columns: 1fr; gap: 0.7rem; }
+      .card { padding: 1rem 0.9rem !important; }
+      .main { padding: 1rem 0.5rem !important; }
+      .hdr-row { height: auto; flex-wrap: wrap; padding: 8px 0; }
+      .nav-row { height: auto; flex-wrap: wrap; padding: 6px 0 8px; }
+      .nav-row button { padding: 6px 10px !important; font-size: 0.8rem !important; }
+      .modal-head { flex-wrap: wrap; gap: 8px; }
+      .modal-head button { padding: 6px 10px !important; font-size: 0.78rem !important; }
+      .item-table { min-width: 640px; }
+      .hist-table { min-width: 720px; }
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel" data-presets="classic-react">
+const { useState, useEffect, useRef } = React;
+
+const APP_VERSION = "Ver1-002";
+
+// ============================================================
+// FIREBASE CONFIG（IERと同じプロジェクトに aisanta_ 接頭辞で間借り）
+// ============================================================
+const FIREBASE_CONFIG = {
+  apiKey:            "AIzaSyAJmNm7RjaBhe8AAUfGqjL7RS37MLmEBII",
+  authDomain:        "invoice-app-544b6.firebaseapp.com",
+  projectId:         "invoice-app-544b6",
+  storageBucket:     "invoice-app-544b6.firebasestorage.app",
+  messagingSenderId: "245544696406",
+  appId:             "1:245544696406:web:a08ba67808c73762eb19f7",
+};
+const COLLECTIONS = { docs: "aisanta_docs", trash: "aisanta_trash", masters: "aisanta_masters" };
+
+const loadFirebase = (() => {
+  let promise = null;
+  return () => {
+    if (promise) return promise;
+    promise = new Promise((resolve, reject) => {
+      const load = (s) => new Promise((res, rej) => {
+        const el = document.createElement("script");
+        el.src = s; el.onload = res; el.onerror = rej;
+        document.head.appendChild(el);
+      });
+      Promise.all([
+        load("https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"),
+        load("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"),
+      ]).then(() => {
+        window.firebase.initializeApp(FIREBASE_CONFIG);
+        resolve(window.firebase.firestore());
+      }).catch(reject);
+    });
+    return promise;
+  };
+})();
+
+async function fbGetMasters(db) {
+  const snap = await db.collection(COLLECTIONS.masters).get();
+  const result = {};
+  snap.forEach(d => { result[d.id] = d.data().value; });
+  return result;
+}
+async function fbSetMaster(db, key, value) {
+  await db.collection(COLLECTIONS.masters).doc(key).set({ value: stripUndefined(value) });
+}
+function sortByCreatedDesc(arr) {
+  return arr.slice().sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+}
+function stripUndefined(value) {
+  if (Array.isArray(value)) return value.map(stripUndefined);
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const k in value) {
+      if (value[k] === undefined) continue;
+      out[k] = stripUndefined(value[k]);
+    }
+    return out;
+  }
+  return value;
+}
+async function fbSaveDoc(db, collName, doc) {
+  const { _fbId, ...data } = doc;
+  if (!doc.id) throw new Error("doc.id が未設定のため保存できません");
+  await db.collection(collName).doc(String(doc.id)).set(stripUndefined(data));
+}
+async function fbDeleteDoc(db, collName, id) {
+  await db.collection(collName).doc(String(id)).delete();
+}
+function fbSubscribe(db, collName, onChange, onError) {
+  return db.collection(collName).onSnapshot(
+    snap => onChange(sortByCreatedDesc(snap.docs.map(d => ({ ...d.data(), _fbId: d.id })))),
+    err  => { console.error("Firestore購読エラー(" + collName + "):", err); if (onError) onError(err); }
+  );
+}
+
+// ============================================================
+// INITIAL MASTER DATA（AIサンタ用の初期値・マスター管理から編集できる）
+// ============================================================
+const initialCompany = {
+  name: "AIサンタ", rep: "宮守 洋輔",
+  postal: "", address: "", tel: "",
+  email: "bpx.snc1980@gmail.com",
+  bank: "", invoiceNo: "",
+};
+const initialClients = [];   // 宛先マスター（お客様名）
+const initialProducts = [
+  { id: 1, name: "クチコミぐんぐん 月額利用料（Plan A）", price: 9800 },
+  { id: 2, name: "クチコミぐんぐん 初期設定費",           price: 0 },
+  { id: 3, name: "ホームページ制作",                       price: 0 },
+  { id: 4, name: "LP（ランディングページ）制作",           price: 0 },
+  { id: 5, name: "AIツール開発",                           price: 0 },
+  { id: 6, name: "保守・運用（月額）",                     price: 0 },
+  { id: 7, name: "打ち合わせ・ご相談",                     price: 0 },
+];
+const initialSubjects = [
+  { id: 1, text: "クチコミぐんぐん 月額利用料のご請求" },
+  { id: 2, text: "クチコミぐんぐん 導入のお見積" },
+  { id: 3, text: "ホームページ制作のお見積" },
+  { id: 4, text: "ホームページ制作費のご請求" },
+  { id: 5, text: "AIツール開発のお見積" },
+];
+
+const EMPTY_ITEM  = () => ({ name: "", qty: 1, price: 0 });
+const BLANK_ITEMS = () => Array.from({ length: 10 }, EMPTY_ITEM);
+
+// ============================================================
+// HELPERS
+// ============================================================
+const fmt          = (n) => Number(n || 0).toLocaleString("ja-JP");
+// 日付は端末のローカル日付で作る（toISOStringはUTCになり、朝9時前は前日にズレるため使わない）
+const localISO     = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const today        = () => localISO(new Date());
+const ym           = (d) => d ? d.slice(0, 7) : "";
+const ymLabel      = (s) => s ? s.replace("-", "年") + "月" : "";
+const nextMonthEnd = () => { const d = new Date(); d.setMonth(d.getMonth() + 1); d.setDate(0); return localISO(d); };
+const genId        = () => Date.now().toString(36).toUpperCase() + "-" + Math.random().toString(36).slice(2, 10).toUpperCase();
+const docPrefix    = (type) => type === "invoice" ? "INV" : "EST";
+const ymd = () => {
+  const d = new Date();
+  return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+};
+// 番号形式: PREFIX-yyyymmdd-xxx-zz（xxx=その日のタイプ別作成順・zz=枝番）
+const parseDocNumber = (no) => {
+  const m = /^([A-Z]+)-(\d{8})-(\d{3})-(\d{2})$/.exec(no || "");
+  if (!m) return null;
+  return { prefix: m[1], date: m[2], seq: Number(m[3]), copy: Number(m[4]) };
+};
+const formatDocNumber = (type, docs) => {
+  const prefix = docPrefix(type);
+  const date   = ymd();
+  let maxSeq = 0;
+  docs.forEach((d) => {
+    if (d.type !== type) return;
+    const p = parseDocNumber(d.docNumber);
+    if (p && p.prefix === prefix && p.date === date && p.seq > maxSeq) maxSeq = p.seq;
+  });
+  return `${prefix}-${date}-${String(maxSeq + 1).padStart(3, "0")}-01`;
+};
+const formatCopyNumber = (srcNo, docs) => {
+  const p = parseDocNumber(srcNo);
+  if (!p) return null;
+  const base = `${p.prefix}-${p.date}-${String(p.seq).padStart(3, "0")}`;
+  let maxCopy = 1;
+  docs.forEach((d) => {
+    const q = parseDocNumber(d.docNumber);
+    if (q && q.prefix === p.prefix && q.date === p.date && q.seq === p.seq && q.copy > maxCopy) maxCopy = q.copy;
+  });
+  return `${base}-${String(maxCopy + 1).padStart(2, "0")}`;
+};
+const isOriginalCopy = (no) => { const p = parseDocNumber(no); return p ? p.copy === 1 : false; };
+const fmtJP = (s) => { if (!s) return "—"; const p = String(s).split("-"); return p.length === 3 ? p[0] + "年" + p[1] + "月" + p[2] + "日" : s; };
+const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+// ============================================================
+// STORAGE（端末内バックアップ）
+// ============================================================
+const KEYS = { docs: "aisanta_docs1", company: "aisanta_company1", clients: "aisanta_clients1", products: "aisanta_products1", subjects: "aisanta_subjects1", trash: "aisanta_trash1" };
+const load    = (key, def) => { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : def; } catch { return def; } };
+const persist = (key, val) => { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} };
+
+// ============================================================
+// CALC（税込み金額のみ・消費税の別建てなし）
+// ============================================================
+function itemGross(item) { return Number(item.qty || 0) * Number(item.price || 0); }
+function calcTotals(form) {
+  const items    = form.items || [];
+  const subtotal = items.reduce((s, i) => s + itemGross(i), 0);
+  const discountAmt = form.discountType === "%"
+    ? Math.round(subtotal * (Number(form.discount || 0) / 100))
+    : Math.min(Number(form.discount || 0), subtotal);
+  const total          = subtotal - discountAmt;
+  const partialPayment = form.type === "invoice" ? Number(form.partialPayment || 0) : 0;
+  const remaining      = total - partialPayment;
+  return { subtotal, discountAmt, total, partialPayment, remaining };
+}
+
+// ============================================================
+// EDIT LOG
+// ============================================================
+const nowStr = () => {
+  const d = new Date();
+  return `${d.getFullYear()}/${String(d.getMonth()+1).padStart(2,"0")}/${String(d.getDate()).padStart(2,"0")} ${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
+};
+const FIELD_LABELS = {
+  docNumber: "書類番号", createdAt: "作成日", dueDate: "支払/見積期限",
+  clientName: "宛先", honorific: "敬称", subject: "件名", note: "備考",
+  specialNotes: "特記事項", discount: "割引値", discountType: "割引種別", partialPayment: "内入金済み",
+};
+function detectChanges(prev, next) {
+  const changes = [];
+  for (const key of Object.keys(FIELD_LABELS)) {
+    const pv = String(prev[key] ?? ""), nv = String(next[key] ?? "");
+    if (pv !== nv) changes.push(`${FIELD_LABELS[key]}：「${pv === "" ? "（空白）" : pv}」→「${nv === "" ? "（空白）" : nv}」`);
+  }
+  const pi = prev.items || [], ni = next.items || [];
+  for (let i = 0; i < Math.max(pi.length, ni.length); i++) {
+    const p = pi[i] || {}, n = ni[i] || {};
+    if (p.name !== n.name || String(p.qty) !== String(n.qty) || String(p.price) !== String(n.price)) {
+      const row = i + 1;
+      if (!p.name && n.name) changes.push(`明細${row}行目：追加「${n.name}」`);
+      else if (p.name && !n.name) changes.push(`明細${row}行目：削除「${p.name}」`);
+      else {
+        const diffs = [];
+        if (p.name !== n.name) diffs.push(`品目「${p.name}」→「${n.name}」`);
+        if (String(p.qty) !== String(n.qty)) diffs.push(`数量${p.qty}→${n.qty}`);
+        if (String(p.price) !== String(n.price)) diffs.push(`単価¥${fmt(p.price)}→¥${fmt(n.price)}`);
+        if (diffs.length) changes.push(`明細${row}行目：${diffs.join("、")}`);
+      }
+    }
+  }
+  return changes;
+}
+
+// ============================================================
+// PDF 明細セルの「1段スマート収め」（IERから移植）
+// ============================================================
+const SMART_FIT_SCRIPT = `<script>
+(function () {
+  var MIN_PX = 7; var ran = false;
+  function run() {
+    if (ran) return; ran = true;
+    var tables = document.querySelectorAll('table.smart-fit');
+    for (var t = 0; t < tables.length; t++) {
+      var table = tables[t]; var host = table.parentElement; var avail = host.clientWidth;
+      var cells = Array.prototype.slice.call(table.querySelectorAll('td.fit-cell'));
+      if (!cells.length) continue;
+      function cellWraps(td) {
+        var fs = parseFloat(getComputedStyle(td).fontSize) || 11;
+        var r = document.createRange(); r.selectNodeContents(td);
+        var h = r.getBoundingClientRect().height; if (r.detach) r.detach();
+        return h > fs * 1.8;
+      }
+      var wrapping = false;
+      for (var i = 0; i < cells.length; i++) { if (cellWraps(cells[i])) { wrapping = true; break; } }
+      if (!wrapping) continue;
+      var ths = table.querySelectorAll('th');
+      for (var h = 0; h < ths.length; h++) ths[h].style.width = 'auto';
+      table.style.tableLayout = 'auto';
+      for (var c = 0; c < cells.length; c++) { cells[c].style.whiteSpace = 'nowrap'; cells[c].style.overflow = 'hidden'; }
+      var size = parseFloat(getComputedStyle(cells[0]).fontSize) || 11; var guard = 0;
+      while (table.offsetWidth > avail + 0.5 && size > MIN_PX && guard < 120) {
+        size -= 0.5; for (var j = 0; j < cells.length; j++) cells[j].style.fontSize = size + 'px'; guard++;
+      }
+      if (table.offsetWidth > avail + 0.5) {
+        for (var k = 0; k < cells.length; k++) { cells[k].style.whiteSpace = 'normal'; cells[k].style.overflow = 'visible'; }
+      }
+    }
+  }
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(run);
+  setTimeout(run, 500);
+})();
+<\/script>`;
+
+// ============================================================
+// PDF PRINT TEMPLATE（A4・IERの黒×金デザイン）
+// ============================================================
+function buildPrintHTML(doc, company) {
+  const { subtotal, discountAmt, total, partialPayment, remaining } = calcTotals(doc);
+  const isInv  = doc.type === "invoice";
+  const accent = isInv ? "#1a1208" : "#7a5c2e";
+  const gold   = "#c8a96e";
+  const co     = company || {};
+
+  const allItems = [...(doc.items || [])];
+  while (allItems.length < 10) allItems.push({ name: "", qty: "", price: "" });
+
+  const itemRows = allItems.slice(0, 10).map((item, i) => {
+    const isEmpty = !item.name;
+    const bg = i % 2 === 0 ? "#fffdf9" : "#f7f3ee";
+    return `<tr style="background:${bg};">
+      <td class="fit-cell" style="padding:7px 10px;border-bottom:1px solid #ccc;height:30px;color:#111;">${esc(item.name)}</td>
+      <td style="padding:7px 10px;border-bottom:1px solid #ccc;text-align:center;color:#111;">${isEmpty ? "" : esc(item.qty)}</td>
+      <td style="padding:7px 10px;border-bottom:1px solid #ccc;text-align:right;color:#111;white-space:nowrap;">${isEmpty ? "" : "¥ " + fmt(item.price)}</td>
+      <td style="padding:7px 10px;border-bottom:1px solid #ccc;text-align:right;font-weight:${isEmpty ? 400 : 700};color:#111;white-space:nowrap;">${isEmpty ? "" : "¥ " + fmt(itemGross(item))}</td>
+    </tr>`;
+  }).join("");
+
+  const notesLines = (doc.specialNotes || "").split("\n");
+  while (notesLines.length < 7) notesLines.push("");
+  const noteRows = notesLines.slice(0, 7).map((line) =>
+    `<div style="border-bottom:1px solid #e0d8cc;height:26px;line-height:26px;font-size:0.78rem;padding:0 8px;">${esc(line)}</div>`).join("");
+
+  const discountRow = discountAmt > 0
+    ? `<tr><td style="padding:4px 20px 4px 10px;color:#c0392b;border-bottom:1px solid #e0d8cc;">${doc.discountType === "%" ? "割引（" + esc(doc.discount) + "%）" : "値引"}</td><td style="padding:4px 10px;text-align:right;border-bottom:1px solid #e0d8cc;color:#c0392b;">－¥ ${fmt(discountAmt)}</td></tr>`
+    : "";
+  const summaryRows = `
+    <tr><td style="padding:5px 20px 5px 10px;color:#333;border-bottom:1px solid #ccc;font-weight:600;">小計</td><td style="padding:5px 10px;text-align:right;border-bottom:1px solid #ccc;min-width:115px;font-weight:600;">¥ ${fmt(subtotal)}</td></tr>
+    ${discountRow}
+    <tr style="border-top:2px solid ${gold};"><td style="padding:7px 20px 7px 10px;font-weight:700;font-size:0.9rem;color:${accent};">合計（税込）</td><td style="padding:7px 10px;text-align:right;font-weight:700;font-size:1rem;">¥ ${fmt(total)}</td></tr>
+    ${isInv && partialPayment > 0 ? `
+    <tr><td style="padding:4px 20px 4px 10px;color:#2d6a9e;border-bottom:1px solid #e0d8cc;">内入金済み</td><td style="padding:4px 10px;text-align:right;border-bottom:1px solid #e0d8cc;color:#2d6a9e;">－¥ ${fmt(partialPayment)}</td></tr>
+    <tr style="background:#1a120808;"><td style="padding:8px 20px 8px 10px;font-weight:700;font-size:0.95rem;color:${accent};">ご請求金額残</td><td style="padding:8px 10px;text-align:right;font-weight:700;font-size:1.05rem;color:${accent};">¥ ${fmt(remaining)}</td></tr>` : ""}
+  `;
+
+  const addrLine = [co.postal, co.address].filter(Boolean).join("　");
+  const contactLine = [co.tel ? "TEL: " + co.tel : "", co.email].filter(Boolean).join("　");
+
+  return `<!DOCTYPE html>
+<html lang="ja"><head><meta charset="UTF-8">
+<title>${isInv ? "請求書" : "見積書"} ${esc(doc.docNumber)}</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+JP:wght@400;700&display=swap');
+  *{box-sizing:border-box;margin:0;padding:0;}
+  html,body{width:210mm;min-height:297mm;}
+  body{font-family:'Noto Serif JP',Georgia,serif;color:#1a1208;background:#fff;padding:12mm 14mm 10mm 14mm;font-size:11pt;}
+  @page{size:A4 portrait;margin:0;}
+  @media print{html,body{width:210mm;min-height:297mm;}}
+</style></head><body>
+<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:9px;">
+  <div>
+    <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:5px;">
+      <h1 style="font-size:1.8rem;font-weight:700;letter-spacing:0.12em;color:${accent};margin:0;">${isInv ? "請求書" : "見積書"}</h1>
+      <span style="background:${accent};color:${gold};font-size:0.6rem;font-weight:700;letter-spacing:0.12em;padding:2px 10px;border-radius:2px;">${isInv ? "INVOICE" : "ESTIMATE"}</span>
+    </div>
+    <table style="font-size:0.8rem;border-collapse:collapse;margin-top:4px;">
+      <tr>
+        <td style="color:#555;padding-right:8px;padding-bottom:5px;">${isInv ? "請求書番号" : "見積書番号"}</td>
+        <td style="font-weight:700;color:#111;padding-right:24px;padding-bottom:5px;">${esc(doc.docNumber)}</td>
+        <td style="color:#555;padding-right:8px;padding-bottom:5px;">作成日</td>
+        <td style="font-weight:700;color:#111;padding-bottom:5px;">${fmtJP(doc.createdAt)}</td>
+      </tr>
+      <tr>
+        <td style="color:#555;padding-right:8px;">${isInv ? "お支払期限" : "有効期限"}</td>
+        <td style="font-weight:700;color:${isInv ? "#c0392b" : accent};padding-right:24px;">${fmtJP(doc.dueDate)}</td>
+        <td></td><td></td>
+      </tr>
+    </table>
+  </div>
+  <div style="text-align:right;font-size:0.75rem;line-height:1.9;color:#222;">
+    <div style="font-weight:700;font-size:0.95rem;color:#1a1208;margin-bottom:2px;">${esc(co.name)}</div>
+    ${co.rep ? `<div style="color:${accent};font-weight:700;">${esc(co.rep)}</div>` : ""}
+    ${addrLine ? `<div>${esc(addrLine)}</div>` : ""}
+    ${contactLine ? `<div>${esc(contactLine)}</div>` : ""}
+    ${co.invoiceNo ? `<div style="font-size:0.72rem;color:#555;margin-top:1px;">登録番号: ${esc(co.invoiceNo)}</div>` : ""}
+  </div>
+</div>
+<div style="height:2px;background:linear-gradient(to right,${accent},${gold},#f5f0eb);margin-bottom:9px;"></div>
+<div style="margin-bottom:9px;">
+  <div style="font-size:0.98rem;font-weight:700;border-bottom:2px solid ${gold};padding-bottom:3px;margin-bottom:5px;display:inline-block;">${esc(doc.clientName) || "　"}　${esc(doc.honorific || "御中")}</div>
+  <div style="font-size:0.85rem;display:flex;gap:8px;"><span style="color:${accent};font-weight:700;white-space:nowrap;">件名</span><span>${esc(doc.subject)}</span></div>
+  <div style="font-size:0.8rem;color:#333;display:flex;gap:8px;margin-top:3px;"><span style="white-space:nowrap;">備考</span><span>${esc(doc.note)}</span></div>
+</div>
+<div class="fit-host">
+<table class="smart-fit" style="width:100%;border-collapse:collapse;font-size:0.85rem;margin-bottom:8px;">
+  <thead><tr>
+    <th style="background:${accent};color:${gold};padding:7px 10px;text-align:left;width:52%;font-weight:700;letter-spacing:0.04em;">品目</th>
+    <th style="background:${accent};color:${gold};padding:7px 10px;text-align:center;width:12%;font-weight:700;">数量</th>
+    <th style="background:${accent};color:${gold};padding:7px 10px;text-align:right;width:18%;font-weight:700;">単価（円）</th>
+    <th style="background:${accent};color:${gold};padding:7px 10px;text-align:right;width:18%;font-weight:700;">金額（円）</th>
+  </tr></thead>
+  <tbody>${itemRows}</tbody>
+</table>
+</div>
+<div style="display:flex;justify-content:flex-end;margin-bottom:11px;">
+  <table style="font-size:0.88rem;border-collapse:collapse;min-width:280px;"><tbody>${summaryRows}</tbody></table>
+</div>
+<div style="margin-bottom:11px;">
+  <div style="font-size:0.8rem;font-weight:700;letter-spacing:0.08em;color:${accent};border-left:3px solid ${gold};padding-left:8px;margin-bottom:5px;">特記事項</div>
+  <div style="border:1px solid #c8b88a;border-radius:2px;padding:4px 10px;">${noteRows}</div>
+</div>
+${isInv ? `<div style="border:1px solid ${gold};border-radius:2px;padding:8px 14px;font-size:0.82rem;"><span style="font-weight:700;color:${accent};margin-right:12px;">■ お振込先</span><span style="color:#222;">${esc(co.bank) || "（マスター管理で振込先を設定してください）"}</span></div>` : ""}
+${SMART_FIT_SCRIPT}
+</body></html>`;
+}
+
+// ============================================================
+// STYLES（IERと同じトーン：黒 #1a1208 × 金 #c8a96e × 生成り #f5f0eb）
+// ============================================================
+const S = {
+  app:          { fontFamily: "'Noto Serif JP', Georgia, serif", background: "#f5f0eb", minHeight: "100vh", color: "#1a1208" },
+  header:       { background: "#1a1208", color: "#e8d9c0", padding: "0 1.5rem", boxShadow: "0 2px 12px #0006" },
+  navBtn: (a)  => ({ background: a ? "#c8a96e" : "transparent", color: a ? "#1a1208" : "#e8d9c0", border: "1px solid #c8a96e44", borderRadius: 4, padding: "6px 16px", cursor: "pointer", fontFamily: "inherit", fontSize: "0.85rem", transition: "all .2s", whiteSpace: "nowrap" }),
+  main:         { maxWidth: 1040, margin: "0 auto", padding: "2rem 1rem" },
+  card:         { background: "#fff", borderRadius: 8, boxShadow: "0 2px 16px #1a120812", padding: "1.5rem 2rem", marginBottom: "1.25rem" },
+  sectionTitle: { fontSize: "0.92rem", fontWeight: 700, letterSpacing: "0.1em", borderBottom: "2px solid #c8a96e", paddingBottom: 5, marginBottom: 14, color: "#7a5c2e" },
+  label:        { display: "block", fontSize: "0.76rem", color: "#7a5c2e", marginBottom: 3, fontWeight: 600, letterSpacing: "0.05em" },
+  input:        { width: "100%", border: "1px solid #d4c4a0", borderRadius: 4, padding: "7px 10px", fontFamily: "inherit", fontSize: "0.88rem", background: "#fffdf9", color: "#1a1208", boxSizing: "border-box" },
+  select:       { width: "100%", border: "1px solid #d4c4a0", borderRadius: 4, padding: "7px 10px", fontFamily: "inherit", fontSize: "0.88rem", background: "#fffdf9", color: "#1a1208", boxSizing: "border-box" },
+  btn:   (c = "#c8a96e") => ({ background: c, color: c === "#c8a96e" ? "#1a1208" : "#fff", border: "none", borderRadius: 4, padding: "8px 20px", cursor: "pointer", fontFamily: "inherit", fontSize: "0.88rem", fontWeight: 700, letterSpacing: "0.05em", whiteSpace: "nowrap" }),
+  btnSm: (c = "#c8a96e") => ({ background: c, color: c === "#c8a96e" ? "#1a1208" : "#fff", border: "none", borderRadius: 4, padding: "4px 12px", cursor: "pointer", fontFamily: "inherit", fontSize: "0.78rem", fontWeight: 700, whiteSpace: "nowrap" }),
+  row:   { display: "flex", gap: "0.75rem", alignItems: "center" },
+  tag:   (t) => ({ display: "inline-block", padding: "2px 10px", borderRadius: 12, fontSize: "0.73rem", fontWeight: 700, background: t === "invoice" ? "#1a1208" : "#c8a96e", color: t === "invoice" ? "#c8a96e" : "#1a1208" }),
+  th:    { background: "#1a1208", color: "#c8a96e", padding: "7px 10px", textAlign: "left", fontWeight: 600, fontSize: "0.82rem", whiteSpace: "nowrap" },
+  td:    { padding: "7px 10px", borderBottom: "1px solid #e8d9c0", fontSize: "0.84rem" },
+};
+const ACCENT = { invoice: "#1a1208", estimate: "#7a5c2e" };
+const TYPE_LABEL = { invoice: "請求書", estimate: "見積書" };
+
+// ============================================================
+// ITEM ROW（明細行）
+// ============================================================
+function ItemRow({ item, idx, products, onChange, onClear }) {
+  return (
+    <tr style={{ background: idx % 2 === 0 ? "#fffdf9" : "#f7f3ee" }}>
+      <td style={{ ...S.td, width: "55%" }}>
+        <div style={{ display: "flex", gap: 4 }}>
+          <select style={{ ...S.select, flex: "0 0 auto", width: 148, fontSize: "0.78rem" }} value=""
+            onChange={(e) => { const p = products.find((p) => p.name === e.target.value); if (p) onChange(idx, { name: p.name, price: p.price }); }}>
+            <option value="">マスターから選択</option>
+            {products.map((p) => <option key={p.id} value={p.name}>{p.name}</option>)}
+          </select>
+          <input style={{ ...S.input, flex: 1, fontSize: "0.82rem" }} placeholder="品目名を入力"
+            value={item.name} onChange={(e) => onChange(idx, { name: e.target.value })} />
+        </div>
+      </td>
+      <td style={{ ...S.td, width: "10%" }}>
+        <input type="number" min="0" style={{ ...S.input, textAlign: "right" }} value={item.qty} onChange={(e) => onChange(idx, { qty: e.target.value })} />
+      </td>
+      <td style={{ ...S.td, width: "16%" }}>
+        <input type="number" min="0" style={{ ...S.input, textAlign: "right" }} value={item.price} onChange={(e) => onChange(idx, { price: e.target.value })} />
+      </td>
+      <td style={{ ...S.td, width: "14%", textAlign: "right", fontWeight: 600, whiteSpace: "nowrap" }}>
+        {!item.name ? "—" : `¥ ${fmt(itemGross(item))}`}
+      </td>
+      <td style={{ ...S.td, width: "5%", textAlign: "center" }}>
+        <button style={S.btnSm("#bbb")} onClick={() => onClear(idx)}>✕</button>
+      </td>
+    </tr>
+  );
+}
+
+// ============================================================
+// EDIT PANEL（請求書・見積書 共通の編集画面）
+// ============================================================
+function EditPanel({ form, setField, setItem, clearItem, company, clients, subjects, products, saveDoc, printPDF, onSelectType }) {
+  const { subtotal, discountAmt, total, partialPayment, remaining } = calcTotals(form);
+  const isInv  = form.type === "invoice";
+  const accent = ACCENT[form.type];
+
+  return (
+    <div>
+      {/* 操作バー */}
+      <div className="card op-bar" style={{ ...S.card, padding: "1rem 1.5rem" }}>
+        <span style={{ fontWeight: 700, color: "#7a5c2e", fontSize: "0.85rem", whiteSpace: "nowrap" }}>書類種別:</span>
+        {[["invoice","📄 請求書"],["estimate","📋 見積書"]].map(([v,l]) => (
+          <label key={v} style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer", fontSize: "0.85rem",
+            fontWeight: form.type === v ? 700 : 400, color: form.type === v ? ACCENT[v] : "#666",
+            background: form.type === v ? "#f5f0eb" : "transparent",
+            border: `1px solid ${form.type === v ? ACCENT[v] : "#d4c4a0"}`, borderRadius: 4, padding: "4px 12px" }}>
+            <input type="radio" style={{ accentColor: ACCENT[v] }} checked={form.type === v} onChange={() => onSelectType(v)} /> {l}
+          </label>
+        ))}
+        {form.sourceDocNo && <span style={{ fontSize: "0.74rem", color: "#7a5c2e", background: "#f5f0eb", border: "1px solid #c8a96e55", borderRadius: 4, padding: "3px 8px" }}>元の見積書: {form.sourceDocNo}</span>}
+        <div style={{ flex: 1 }} />
+        <button style={S.btn("#2ecc71")} onClick={saveDoc}>💾 保存</button>
+        <button style={S.btn("#1a1208")} onClick={() => printPDF(form)}>🖨 PDF出力</button>
+      </div>
+
+      {/* 基本情報 */}
+      <div className="card" style={S.card}>
+        <div style={S.sectionTitle}>基本情報</div>
+        <div className="g3">
+          <div>
+            <label style={S.label}>{isInv ? "請求書番号" : "見積書番号"}</label>
+            <input style={S.input} value={form.docNumber} onChange={(e) => setField("docNumber", e.target.value)} />
+          </div>
+          <div>
+            <label style={S.label}>作成日</label>
+            <input type="date" style={S.input} value={form.createdAt} onChange={(e) => setField("createdAt", e.target.value)} />
+          </div>
+          <div>
+            <label style={S.label}>{isInv ? "お支払期限" : "有効期限"}</label>
+            <input type="date" style={S.input} value={form.dueDate} onChange={(e) => setField("dueDate", e.target.value)} />
+          </div>
+        </div>
+      </div>
+
+      {/* 案件情報 */}
+      <div className="card" style={S.card}>
+        <div style={S.sectionTitle}>案件情報</div>
+        <div style={{ marginBottom: 10 }}>
+          <label style={S.label}>宛先　<span style={{ fontSize: "0.72rem", color: "#aaa", fontWeight: 400 }}>（敬称は右側で選択）</span></label>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            <select style={{ ...S.select, flex: "0 0 auto", width: 160, fontSize: "0.82rem" }} value=""
+              onChange={(e) => { const c = clients.find((c) => String(c.id) === e.target.value); if (c) { setField("clientName", c.name); setField("honorific", c.honorific || "御中"); } }}>
+              <option value="">マスターから選択</option>
+              {clients.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+            <input style={{ ...S.input, flex: 1, minWidth: 160 }} placeholder="店舗名・会社名 または お名前" value={form.clientName} onChange={(e) => setField("clientName", e.target.value)} />
+            <select style={{ ...S.select, flex: "0 0 auto", width: 80, fontWeight: 700, fontSize: "0.95rem", textAlign: "center" }}
+              value={form.honorific || "御中"} onChange={(e) => setField("honorific", e.target.value)}>
+              <option value="御中">御中</option>
+              <option value="様">様</option>
+            </select>
+          </div>
+        </div>
+        <div className="g2">
+          <div>
+            <label style={S.label}>件名</label>
+            <div style={{ display: "flex", gap: 4 }}>
+              <select style={{ ...S.select, flex: "0 0 auto", width: 160, fontSize: "0.82rem" }} value=""
+                onChange={(e) => { if (e.target.value) setField("subject", e.target.value); }}>
+                <option value="">マスターから選択</option>
+                {subjects.map((s) => <option key={s.id} value={s.text}>{s.text}</option>)}
+              </select>
+              <input style={{ ...S.input, flex: 1 }} placeholder="件名を直接入力" value={form.subject} onChange={(e) => setField("subject", e.target.value)} />
+            </div>
+          </div>
+          <div>
+            <label style={S.label}>但し書 / 備考</label>
+            <input style={S.input} placeholder={isInv ? "上記の通り、ご請求申し上げます。" : "上記の通り、お見積り申し上げます。"} value={form.note} onChange={(e) => setField("note", e.target.value)} />
+          </div>
+        </div>
+      </div>
+
+      {/* 明細 */}
+      <div className="card" style={S.card}>
+        <div style={{ display: "flex", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ ...S.sectionTitle, margin: 0, flex: 1 }}>明細（最大10行）</div>
+          <span style={{ fontSize: "0.75rem", color: "#7a5c2e", background: "#f5f0eb", padding: "3px 10px", borderRadius: 4, border: "1px solid #c8a96e55", whiteSpace: "nowrap" }}>金額は税込</span>
+        </div>
+        <div className="tbl-wrap">
+          <table className="item-table" style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr>
+              <th style={{ ...S.th, width: "55%" }}>品目</th>
+              <th style={{ ...S.th, width: "10%", textAlign: "center" }}>数量</th>
+              <th style={{ ...S.th, width: "16%", textAlign: "right" }}>単価（円）</th>
+              <th style={{ ...S.th, width: "14%", textAlign: "right" }}>金額（円）</th>
+              <th style={{ ...S.th, width: "5%" }}></th>
+            </tr></thead>
+            <tbody>
+              {form.items.map((item, idx) => (
+                <ItemRow key={idx} item={item} idx={idx} products={products} onChange={setItem} onClear={clearItem} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* 割引・入金・合計 */}
+      <div className="card" style={S.card}>
+        <div style={S.sectionTitle}>{isInv ? "割引 / 入金・合計" : "割引 / 合計"}</div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 24, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <label style={{ ...S.label, margin: 0, whiteSpace: "nowrap" }}>割引・値引:</label>
+              <select style={{ ...S.select, width: 110 }} value={form.discountType} onChange={(e) => setField("discountType", e.target.value)}>
+                <option value="%">％ 割引</option>
+                <option value="¥">¥ 値引</option>
+              </select>
+              <input type="number" min="0" style={{ ...S.input, width: 120, textAlign: "right" }} value={form.discount} onChange={(e) => setField("discount", e.target.value)} />
+              <span style={{ color: "#7a5c2e", fontWeight: 700 }}>{form.discountType}</span>
+            </div>
+            {isInv && (
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <label style={{ ...S.label, margin: 0, whiteSpace: "nowrap" }}>内入金済み:</label>
+                <input type="number" min="0" style={{ ...S.input, width: 150, textAlign: "right" }} value={form.partialPayment || 0} onChange={(e) => setField("partialPayment", e.target.value)} />
+                <span style={{ color: "#2d6a9e", fontWeight: 700 }}>円</span>
+              </div>
+            )}
+          </div>
+          <table style={{ fontSize: "0.88rem", borderCollapse: "collapse", minWidth: 290 }}>
+            <tbody>
+              <tr><td style={{ padding: "4px 20px 4px 8px", color: "#666" }}>小計</td><td style={{ padding: "4px 8px", textAlign: "right", minWidth: 115 }}>¥ {fmt(subtotal)}</td></tr>
+              {discountAmt > 0 && (
+                <tr><td style={{ padding: "4px 20px 4px 8px", color: "#c0392b" }}>{form.discountType === "%" ? `割引（${form.discount}%）` : "値引"}</td><td style={{ padding: "4px 8px", textAlign: "right", color: "#c0392b" }}>－¥ {fmt(discountAmt)}</td></tr>
+              )}
+              <tr style={{ borderTop: "2px solid #c8a96e" }}>
+                <td style={{ padding: "8px 20px 8px 8px", fontWeight: 700, color: "#7a5c2e", fontSize: "0.95rem" }}>合計（税込）</td>
+                <td style={{ padding: "8px 8px", textAlign: "right", fontWeight: 700, fontSize: "1.05rem" }}>¥ {fmt(total)}</td>
+              </tr>
+              {isInv && partialPayment > 0 && (<>
+                <tr><td style={{ padding: "4px 20px 4px 8px", color: "#2d6a9e" }}>内入金済み</td><td style={{ padding: "4px 8px", textAlign: "right", color: "#2d6a9e" }}>－¥ {fmt(partialPayment)}</td></tr>
+                <tr style={{ background: "#f0f7ff", borderTop: "2px solid #2d6a9e" }}>
+                  <td style={{ padding: "8px 20px 8px 8px", fontWeight: 700, color: "#2d6a9e", fontSize: "0.95rem" }}>ご請求金額残</td>
+                  <td style={{ padding: "8px 8px", textAlign: "right", fontWeight: 700, fontSize: "1.1rem", color: "#2d6a9e" }}>¥ {fmt(remaining)}</td>
+                </tr>
+              </>)}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* 特記事項 */}
+      <div className="card" style={S.card}>
+        <div style={S.sectionTitle}>特記事項</div>
+        <textarea style={{ ...S.input, height: 168, resize: "vertical", lineHeight: 1.8 }}
+          placeholder={"特記事項を入力（7行程度）\n例：お支払期限までに下記口座へお振込みをお願いいたします。"}
+          value={form.specialNotes || ""} onChange={(e) => setField("specialNotes", e.target.value)} />
+        <div style={{ fontSize: "0.72rem", color: "#aaa", marginTop: 4 }}>※ PDF出力時に7行の罫線枠に表示されます</div>
+      </div>
+
+      {/* 発行元確認 */}
+      <div className="card" style={{ ...S.card, background: "#fffdf4" }}>
+        <div style={S.sectionTitle}>発行元情報（確認）</div>
+        <div style={{ fontSize: "0.85rem", lineHeight: 1.9 }}>
+          <strong>{company.name}</strong>{company.rep ? `　${company.rep}` : ""}<br />
+          {[company.postal, company.address].filter(Boolean).join(" ") || <span style={{ color: "#aaa" }}>（住所未設定）</span>}<br />
+          {[company.tel ? "TEL: " + company.tel : "", company.email].filter(Boolean).join(" / ")}<br />
+          {isInv && <span style={{ color: company.bank ? "#7a5c2e" : "#c0392b" }}>振込先: {company.bank || "未設定（マスター管理で設定してください）"}</span>}
+        </div>
+      </div>
+
+      {/* 編集履歴 */}
+      {(form.editLog && form.editLog.length > 0) && (
+        <div className="card" style={S.card}>
+          <div style={S.sectionTitle}>編集履歴（最新順）</div>
+          <div className="tbl-wrap">
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.82rem" }}>
+            <thead><tr><th style={{ ...S.th, width: 160 }}>日時</th><th style={S.th}>変更内容</th></tr></thead>
+            <tbody>
+              {form.editLog.map((log, i) => (
+                <tr key={i} style={{ background: i % 2 === 0 ? "#fffdf9" : "#f7f3ee", verticalAlign: "top" }}>
+                  <td style={{ ...S.td, whiteSpace: "nowrap", color: "#7a5c2e", fontWeight: 600 }}>{log.at}</td>
+                  <td style={S.td}>{log.changes.map((c, j) => <div key={j} style={{ padding: "1px 0", borderBottom: j < log.changes.length - 1 ? "1px dashed #e8d9c0" : "none", fontSize: "0.8rem" }}>{c}</div>)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          </div>
+        </div>
+      )}
+
+      {/* 下部 保存ボタン */}
+      <div className="card" style={{ ...S.card, padding: "1rem 1.5rem", display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 12, flexWrap: "wrap" }}>
+        <span style={{ fontSize: "0.82rem", color: "#aaa" }}>入力が完了したら保存してください</span>
+        <button style={{ ...S.btn("#2ecc71"), padding: "10px 32px", fontSize: "1rem" }} onClick={saveDoc}>💾 保存</button>
+        <button style={{ ...S.btn(accent), padding: "10px 24px", fontSize: "1rem" }} onClick={() => printPDF(form)}>🖨 PDF出力</button>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// DETAIL MODAL（閲覧）
+// ============================================================
+function DetailModal({ doc, onClose, onEdit, onPrint, onCopy, onConvert }) {
+  const { subtotal, discountAmt, total, partialPayment, remaining } = calcTotals(doc);
+  const isInv   = doc.type === "invoice";
+  const accent  = ACCENT[doc.type];
+  const gold    = "#c8a96e";
+  const filled  = (doc.items || []).filter((i) => i.name);
+  const canCopy = isOriginalCopy(doc.docNumber);
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "#0007", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div style={{ background: "#fff", borderRadius: 10, width: "100%", maxWidth: 760, maxHeight: "90vh", overflowY: "auto", boxShadow: "0 8px 48px #0005", fontFamily: "inherit" }}>
+        <div className="modal-head" style={{ background: accent, color: gold, padding: "14px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", borderRadius: "10px 10px 0 0" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <span style={{ fontSize: "1.1rem", fontWeight: 700, letterSpacing: "0.1em" }}>{TYPE_LABEL[doc.type]}</span>
+            <span style={{ fontSize: "0.8rem", opacity: 0.8 }}>{doc.docNumber}</span>
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            <button style={S.btn(gold)} onClick={onPrint}>🖨 PDF出力</button>
+            <button style={S.btn("#4a9e6e")} onClick={onEdit}>✏️ 編集</button>
+            {canCopy && <button style={S.btn("#3a7abd")} onClick={onCopy}>📋 コピーして作成</button>}
+            {!isInv && <button style={S.btn("#2d6a9e")} onClick={onConvert}>📄 請求書を作成</button>}
+            <button style={{ background: "transparent", color: "#fff", border: "none", cursor: "pointer", fontSize: "1.2rem", padding: "2px 8px" }} onClick={onClose}>✕</button>
+          </div>
+        </div>
+        <div style={{ padding: "20px" }}>
+          <div className="g2" style={{ gap: 8, marginBottom: 14, fontSize: "0.82rem" }}>
+            {[["作成日", fmtJP(doc.createdAt)], [isInv ? "お支払期限" : "有効期限", fmtJP(doc.dueDate)], ["宛先", (doc.clientName || "") + "　" + (doc.honorific || "御中")], ["件名", doc.subject || "—"]].map(([l, v]) => (
+              <div key={l} style={{ display: "flex", gap: 8 }}>
+                <span style={{ color: "#7a5c2e", fontWeight: 700, whiteSpace: "nowrap", minWidth: 80 }}>{l}</span><span>{v}</span>
+              </div>
+            ))}
+          </div>
+          {doc.note && <div style={{ fontSize: "0.8rem", color: "#666", marginBottom: 8 }}><span style={{ color: "#7a5c2e", fontWeight: 700, marginRight: 8 }}>備考</span>{doc.note}</div>}
+          {doc.sourceDocNo && <div style={{ fontSize: "0.78rem", color: "#7a5c2e", marginBottom: 12 }}>📋 元の見積書: {doc.sourceDocNo}</div>}
+
+          <div className="tbl-wrap">
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.82rem", marginBottom: 12 }}>
+            <thead><tr>
+              {[["品目","55%","left"],["数量","10%","center"],["単価","17%","right"],["金額","18%","right"]].map(([h,w,a]) => (
+                <th key={h} style={{ background: accent, color: gold, padding: "6px 10px", textAlign: a, width: w, fontWeight: 600 }}>{h}</th>
+              ))}
+            </tr></thead>
+            <tbody>
+              {filled.length === 0 && <tr><td colSpan="4" style={{ padding: 12, color: "#aaa", textAlign: "center" }}>明細がありません</td></tr>}
+              {filled.map((item, i) => (
+                <tr key={i} style={{ background: i % 2 === 0 ? "#fffdf9" : "#f7f3ee" }}>
+                  <td style={{ padding: "5px 10px", borderBottom: "1px solid #e0d8cc" }}>{item.name}</td>
+                  <td style={{ padding: "5px 10px", borderBottom: "1px solid #e0d8cc", textAlign: "center" }}>{item.qty}</td>
+                  <td style={{ padding: "5px 10px", borderBottom: "1px solid #e0d8cc", textAlign: "right", whiteSpace: "nowrap" }}>¥ {fmt(item.price)}</td>
+                  <td style={{ padding: "5px 10px", borderBottom: "1px solid #e0d8cc", textAlign: "right", fontWeight: 600, whiteSpace: "nowrap" }}>¥ {fmt(itemGross(item))}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
+            <table style={{ fontSize: "0.82rem", borderCollapse: "collapse", minWidth: 260 }}>
+              <tbody>
+                <tr><td style={{ padding: "4px 20px 4px 10px", color: "#666", borderBottom: "1px solid #e0d8cc" }}>小計</td><td style={{ padding: "4px 10px", textAlign: "right", borderBottom: "1px solid #e0d8cc", minWidth: 110 }}>¥ {fmt(subtotal)}</td></tr>
+                {discountAmt > 0 && <tr><td style={{ padding: "4px 20px 4px 10px", color: "#c0392b", borderBottom: "1px solid #e0d8cc" }}>{doc.discountType === "%" ? `割引（${doc.discount}%）` : "値引"}</td><td style={{ padding: "4px 10px", textAlign: "right", borderBottom: "1px solid #e0d8cc", color: "#c0392b" }}>－¥ {fmt(discountAmt)}</td></tr>}
+                <tr style={{ borderTop: "2px solid #c8a96e" }}><td style={{ padding: "7px 20px 7px 10px", fontWeight: 700, color: accent, fontSize: "0.9rem" }}>合計（税込）</td><td style={{ padding: "7px 10px", textAlign: "right", fontWeight: 700, fontSize: "1rem" }}>¥ {fmt(total)}</td></tr>
+                {isInv && partialPayment > 0 && (<>
+                  <tr><td style={{ padding: "4px 20px 4px 10px", color: "#2d6a9e", borderBottom: "1px solid #e0d8cc" }}>内入金済み</td><td style={{ padding: "4px 10px", textAlign: "right", borderBottom: "1px solid #e0d8cc", color: "#2d6a9e" }}>－¥ {fmt(partialPayment)}</td></tr>
+                  <tr style={{ background: "#f0f7ff" }}><td style={{ padding: "8px 20px 8px 10px", fontWeight: 700, color: accent, fontSize: "0.95rem" }}>ご請求金額残</td><td style={{ padding: "8px 10px", textAlign: "right", fontWeight: 700, fontSize: "1.05rem", color: accent }}>¥ {fmt(remaining)}</td></tr>
+                </>)}
+              </tbody>
+            </table>
+          </div>
+
+          {doc.specialNotes && (
+            <div style={{ background: "#fffdf4", border: "1px solid #e0d8cc", borderRadius: 4, padding: "10px 14px", fontSize: "0.8rem", lineHeight: 1.8 }}>
+              <div style={{ fontWeight: 700, color: "#7a5c2e", marginBottom: 4, fontSize: "0.76rem" }}>特記事項</div>
+              <div style={{ whiteSpace: "pre-wrap" }}>{doc.specialNotes}</div>
+            </div>
+          )}
+          {(doc.editLog && doc.editLog.length > 0) && (
+            <div style={{ marginTop: 14, fontSize: "0.74rem", color: "#888" }}>
+              <span style={{ fontWeight: 700, color: "#7a5c2e" }}>最終更新</span>　{doc.editLog[0].at}　{doc.editLog[0].changes[0]}{doc.editLog.length > 1 ? `（履歴 ${doc.editLog.length} 件・編集画面で確認できます）` : ""}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// HISTORY PANEL（履歴）
+// ============================================================
+function HistoryTable({ docs, type, onView, onEdit, onTrash }) {
+  const [fMonth,   setFMonth]   = useState("");
+  const [fClient,  setFClient]  = useState("");
+  const [fSubject, setFSubject] = useState("");
+  const accent = ACCENT[type];
+  const isInv  = type === "invoice";
+
+  const base        = docs.filter((d) => d.type === type);
+  const months      = [...new Set(base.map((d) => ym(d.createdAt)).filter(Boolean))].sort().reverse();
+  const clientList  = [...new Set(base.map((d) => d.clientName).filter(Boolean))].sort();
+  const subjectList = [...new Set(base.map((d) => d.subject).filter(Boolean))].sort();
+
+  const filtered = [...base]
+    .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || "") || (b.docNumber || "").localeCompare(a.docNumber || ""))
+    .filter((d) => {
+      if (fMonth   && ym(d.createdAt) !== fMonth)   return false;
+      if (fClient  && d.clientName    !== fClient)  return false;
+      if (fSubject && d.subject       !== fSubject) return false;
+      return true;
+    });
+  const sumAmount = filtered.reduce((s, d) => s + (isInv ? calcTotals(d).remaining : calcTotals(d).total), 0);
+
+  return (
+    <div>
+      <div className="card" style={{ ...S.card, borderTop: `3px solid ${accent}` }}>
+        <div style={{ ...S.sectionTitle, color: accent, borderBottomColor: accent }}>フィルター</div>
+        <div className="g3">
+          <div>
+            <label style={S.label}>作成年月</label>
+            <select style={S.select} value={fMonth} onChange={(e) => setFMonth(e.target.value)}>
+              <option value="">すべて</option>{months.map((m) => <option key={m} value={m}>{ymLabel(m)}</option>)}
+            </select>
+          </div>
+          <div>
+            <label style={S.label}>宛先</label>
+            <select style={S.select} value={fClient} onChange={(e) => setFClient(e.target.value)}>
+              <option value="">すべて</option>{clientList.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          <div>
+            <label style={S.label}>件名</label>
+            <select style={S.select} value={fSubject} onChange={(e) => setFSubject(e.target.value)}>
+              <option value="">すべて</option>{subjectList.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+        </div>
+        <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <button style={S.btnSm("#888")} onClick={() => { setFMonth(""); setFClient(""); setFSubject(""); }}>リセット</button>
+          <span style={{ fontSize: "0.8rem", color: "#999" }}>{filtered.length} 件表示</span>
+          <span style={{ fontSize: "0.8rem", color: accent, fontWeight: 700 }}>{isInv ? "残金合計" : "合計"}: ¥ {fmt(sumAmount)}</span>
+        </div>
+      </div>
+
+      <div className="card" style={{ ...S.card, borderTop: `3px solid ${accent}` }}>
+        {filtered.length === 0 && (
+          <p style={{ color: "#aaa", textAlign: "center", padding: "2rem 0" }}>
+            {base.length === 0 ? "まだ保存された書類はありません。" : "条件に一致する書類がありません。"}
+          </p>
+        )}
+        {filtered.length > 0 && (
+          <div className="tbl-wrap">
+          <table className="hist-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.82rem" }}>
+            <thead>
+              <tr>
+                <th style={{ ...S.th, background: accent }}>番号</th>
+                <th style={{ ...S.th, background: accent }}>作成日</th>
+                <th style={{ ...S.th, background: accent }}>{isInv ? "支払期限" : "有効期限"}</th>
+                <th style={{ ...S.th, background: accent }}>宛先</th>
+                <th style={{ ...S.th, background: accent }}>件名</th>
+                <th style={{ ...S.th, background: accent, textAlign: "right" }}>{isInv ? "残金" : "金額"}</th>
+                <th style={{ ...S.th, background: accent, textAlign: "center", width: 156 }}>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((d, i) => {
+                const t = calcTotals(d);
+                const amount = isInv ? t.remaining : t.total;
+                const paid = isInv && t.total > 0 && t.remaining <= 0;
+                return (
+                  <tr key={d.id} style={{ background: i % 2 === 0 ? "#fffdf9" : "#f7f3ee" }}>
+                    <td style={{ ...S.td, whiteSpace: "nowrap", fontSize: "0.78rem" }}>{d.docNumber || "—"}{d.sourceDocNo && <span title={"元の見積書: " + d.sourceDocNo} style={{ marginLeft: 4, fontSize: "0.7rem", color: "#7a5c2e" }}>📋</span>}</td>
+                    <td style={{ ...S.td, whiteSpace: "nowrap" }}>{d.createdAt}</td>
+                    <td style={{ ...S.td, whiteSpace: "nowrap", color: isInv ? "#c0392b" : accent }}>{d.dueDate || "—"}</td>
+                    <td style={S.td}>{d.clientName}{d.honorific ? " " + d.honorific : ""}</td>
+                    <td style={S.td}>{d.subject}</td>
+                    <td style={{ ...S.td, textAlign: "right", fontWeight: 600, whiteSpace: "nowrap" }}>
+                      ¥ {fmt(amount)}{paid && <span style={{ marginLeft: 6, fontSize: "0.7rem", color: "#fff", background: "#2d6a9e", borderRadius: 8, padding: "1px 6px" }}>入金済</span>}
+                    </td>
+                    <td style={{ ...S.td, textAlign: "center", whiteSpace: "nowrap" }}>
+                      <button style={{ ...S.btnSm("#4a7c9e"), marginRight: 4 }} onClick={() => onView(d)}>確認</button>
+                      <button style={{ ...S.btnSm(), marginRight: 4 }} onClick={() => onEdit(d)}>編集</button>
+                      <button style={S.btnSm("#c0392b")} onClick={() => onTrash(d.id)}>🗑</button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function HistoryPanel({ docs, onView, onEdit, onTrash }) {
+  const [histTab, setHistTab] = useState("invoice");
+  const count = (t) => docs.filter((d) => d.type === t).length;
+  const tabBtn = (key, label) => {
+    const color = ACCENT[key];
+    return (
+      <button key={key} onClick={() => setHistTab(key)} style={{
+        background: histTab === key ? color : "#fff", color: histTab === key ? "#fff" : color,
+        border: `2px solid ${color}`, borderRadius: "6px 6px 0 0", padding: "10px 24px", cursor: "pointer",
+        fontFamily: "inherit", fontSize: "0.88rem", fontWeight: 700, letterSpacing: "0.05em",
+        borderBottom: histTab === key ? `2px solid ${color}` : "2px solid #e8d9c0", display: "flex", alignItems: "center", gap: 8,
+      }}>
+        {label}
+        <span style={{ background: histTab === key ? "rgba(255,255,255,0.25)" : color, color: "#fff", borderRadius: 10, fontSize: "0.72rem", padding: "1px 8px", fontWeight: 700 }}>{count(key)}</span>
+      </button>
+    );
+  };
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 4, borderBottom: "2px solid #e8d9c0" }}>
+        {tabBtn("invoice",  "📄 請求書")}
+        {tabBtn("estimate", "📋 見積書")}
+      </div>
+      <HistoryTable key={histTab} docs={docs} type={histTab} onView={onView} onEdit={onEdit} onTrash={onTrash} />
+    </div>
+  );
+}
+
+// ============================================================
+// TRASH PANEL（ゴミ箱・完全削除はしない）
+// ============================================================
+function TrashPanel({ trash, onRestore }) {
+  return (
+    <div className="card" style={{ ...S.card, background: "#fff8f8", border: "1px solid #f0d0d0" }}>
+      <div style={{ ...S.sectionTitle, color: "#c0392b", borderBottomColor: "#f0d0d0" }}>🗑 ゴミ箱</div>
+      <p style={{ fontSize: "0.82rem", color: "#888", marginBottom: 14 }}>ゴミ箱内の書類は完全削除できません。「元に戻す」で履歴に復元できます。</p>
+      {trash.length === 0 && <p style={{ color: "#ccc", textAlign: "center", padding: "2rem 0" }}>ゴミ箱は空です。</p>}
+      {trash.length > 0 && (
+        <div className="tbl-wrap">
+        <table className="hist-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.82rem" }}>
+          <thead><tr>
+            <th style={S.th}>種別</th><th style={S.th}>番号</th><th style={S.th}>作成日</th><th style={S.th}>宛先</th><th style={S.th}>件名</th>
+            <th style={{ ...S.th, textAlign: "right" }}>合計</th><th style={S.th}>移動日時</th><th style={{ ...S.th, textAlign: "center", width: 100 }}>操作</th>
+          </tr></thead>
+          <tbody>
+            {trash.map((d, i) => (
+              <tr key={d.id} style={{ background: i % 2 === 0 ? "#fff8f8" : "#fdf0f0" }}>
+                <td style={S.td}><span style={S.tag(d.type)}>{TYPE_LABEL[d.type]}</span></td>
+                <td style={{ ...S.td, whiteSpace: "nowrap", color: "#999" }}>{d.docNumber}</td>
+                <td style={{ ...S.td, whiteSpace: "nowrap", color: "#999" }}>{d.createdAt}</td>
+                <td style={{ ...S.td, color: "#999" }}>{d.clientName}</td>
+                <td style={{ ...S.td, color: "#999" }}>{d.subject}</td>
+                <td style={{ ...S.td, textAlign: "right", color: "#999", whiteSpace: "nowrap" }}>¥ {fmt(calcTotals(d).total)}</td>
+                <td style={{ ...S.td, whiteSpace: "nowrap", fontSize: "0.76rem", color: "#c0392b" }}>{d.trashedAt}</td>
+                <td style={{ ...S.td, textAlign: "center" }}><button style={S.btnSm("#2d6a9e")} onClick={() => onRestore(d.id)}>↩ 元に戻す</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// SORTABLE TABLE（件名・宛先マスター共通：D&D＋▲▼並び替え）
+// ============================================================
+function SortableTable({ items, setItems, fieldKey, addLabel, newVal, extra }) {
+  const [editId, setEditId] = useState(null);
+  const [dragIdx, setDragIdx] = useState(null);
+  const [dragOver, setDragOver] = useState(null);
+  const moveUp   = (idx) => { if (idx === 0) return; const a = [...items]; [a[idx-1], a[idx]] = [a[idx], a[idx-1]]; setItems(a); };
+  const moveDown = (idx) => { if (idx === items.length - 1) return; const a = [...items]; [a[idx], a[idx+1]] = [a[idx+1], a[idx]]; setItems(a); };
+  const onDragEnd = () => {
+    if (dragIdx === null || dragOver === null || dragIdx === dragOver) { setDragIdx(null); setDragOver(null); return; }
+    const a = [...items]; const [moved] = a.splice(dragIdx, 1); a.splice(dragOver, 0, moved);
+    setItems(a); setDragIdx(null); setDragOver(null);
+  };
+  const update = (id, patch) => setItems((prev) => prev.map((x) => x.id === id ? { ...x, ...patch } : x));
+  return (
+    <div>
+      <div style={{ fontSize: "0.76rem", color: "#7a5c2e", marginBottom: 8 }}>
+        <span style={{ background: "#f5f0eb", border: "1px solid #c8a96e55", borderRadius: 3, padding: "2px 8px" }}>☰ 行をドラッグ、または ▲▼ で並び替えできます</span>
+      </div>
+      <div className="tbl-wrap">
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
+        <thead><tr>
+          <th style={{ ...S.th, width: 32 }}></th>
+          <th style={S.th}>項目</th>
+          {extra && <th style={{ ...S.th, width: extra.width, textAlign: extra.align || "left" }}>{extra.label}</th>}
+          <th style={{ ...S.th, width: 140 }}></th>
+        </tr></thead>
+        <tbody>
+          {items.length === 0 && <tr><td colSpan={extra ? 4 : 3} style={{ padding: 14, color: "#aaa", textAlign: "center" }}>まだ登録がありません。下の「＋」で追加してください。</td></tr>}
+          {items.map((item, idx) => {
+            const isDragging = dragIdx === idx, isOver = dragOver === idx;
+            const rowBg = isDragging ? "#e8d9c0" : isOver ? "#f0ebe0" : idx % 2 === 0 ? "#fffdf9" : "#f7f3ee";
+            const editing = editId === item.id;
+            return (
+              <tr key={item.id} draggable onDragStart={() => setDragIdx(idx)} onDragEnter={() => setDragOver(idx)} onDragEnd={onDragEnd} onDragOver={(e) => e.preventDefault()}
+                style={{ background: rowBg, opacity: isDragging ? 0.5 : 1, outline: isOver ? "2px solid #c8a96e" : "none" }}>
+                <td style={{ ...S.td, textAlign: "center", padding: "4px 6px", cursor: "grab" }}>
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 1 }}>
+                    <button style={{ background: "none", border: "none", cursor: "pointer", color: "#7a5c2e", fontSize: "0.7rem", padding: "1px 4px", lineHeight: 1 }} onClick={() => moveUp(idx)}>▲</button>
+                    <span style={{ fontSize: "0.85rem", color: "#ccc" }}>☰</span>
+                    <button style={{ background: "none", border: "none", cursor: "pointer", color: "#7a5c2e", fontSize: "0.7rem", padding: "1px 4px", lineHeight: 1 }} onClick={() => moveDown(idx)}>▼</button>
+                  </div>
+                </td>
+                <td style={S.td}>{editing ? <input style={S.input} value={item[fieldKey]} onChange={(e) => update(item.id, { [fieldKey]: e.target.value })} /> : item[fieldKey]}</td>
+                {extra && <td style={{ ...S.td, textAlign: extra.align || "left" }}>{extra.render(item, editing, update)}</td>}
+                <td style={S.td}>
+                  {editing
+                    ? <button style={S.btnSm()} onClick={() => setEditId(null)}>完了</button>
+                    : <><button style={{ ...S.btnSm(), marginRight: 6 }} onClick={() => setEditId(item.id)}>編集</button>
+                       <button style={S.btnSm("#c0392b")} onClick={() => { if (confirm(`「${item[fieldKey]}」をマスターから削除しますか？`)) setItems((prev) => prev.filter((x) => x.id !== item.id)); }}>削除</button></>}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      </div>
+      <div style={{ marginTop: 10 }}>
+        <button style={S.btn()} onClick={() => { const id = Date.now(); setItems((p) => [...p, { id, ...newVal }]); setEditId(id); }}>＋ {addLabel}</button>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// MASTER PANEL（発行元・宛先・商品・件名）
+// ============================================================
+function MasterPanel({ company, setCompany, clients, setClients, products, setProducts, subjects, setSubjects, onPush, onPull, syncing, fbStatus }) {
+  const [activeM, setActiveM] = useState("company");
+  const [editC, setEditC] = useState(false);
+  const disabled = syncing || fbStatus !== "online";
+  const companyFields = [["name","屋号・会社名"],["rep","代表者名"],["postal","郵便番号"],["address","住所"],["tel","TEL"],["email","メール"],["bank","振込先（銀行・支店・口座種別・番号・名義）"],["invoiceNo","インボイス登録番号（登録している場合のみ）"]];
+
+  return (
+    <div className="card" style={S.card}>
+      <div style={{ background: "#f0f5f1", border: "1px solid #2d5a3d44", borderRadius: 8, padding: "12px 20px", marginBottom: 20, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <div style={{ flex: 1, minWidth: 200 }}>
+          <div style={{ fontWeight: 700, fontSize: "0.85rem", color: "#2d5a3d", marginBottom: 3 }}>🔄 マスター情報の共有</div>
+          <div style={{ fontSize: "0.76rem", color: "#555", lineHeight: 1.6 }}>
+            編集後は「📤 全端末に反映」を押すと他のPC・スマホにも共有されます。<br />他の端末で変更した場合は「📥 最新を取得」で更新してください。
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <span style={{ fontSize: "0.72rem", padding: "2px 8px", borderRadius: 10, fontWeight: 700, background: fbStatus === "online" ? "#2ecc71" : "#e74c3c", color: "#fff" }}>
+            {fbStatus === "online" ? "🟢 接続中" : "🔴 オフライン"}
+          </span>
+          <button onClick={onPull} disabled={disabled} style={{ ...S.btn("#2d6a9e"), opacity: disabled ? 0.5 : 1, cursor: disabled ? "not-allowed" : "pointer" }}>{syncing ? "⏳ 処理中..." : "📥 最新を取得"}</button>
+          <button onClick={onPush} disabled={disabled} style={{ ...S.btn("#2d5a3d"), color: "#c8a96e", opacity: disabled ? 0.5 : 1, cursor: disabled ? "not-allowed" : "pointer" }}>{syncing ? "⏳ 処理中..." : "📤 全端末に反映"}</button>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap" }}>
+        {[["company","発行元情報"],["clients","宛先"],["products","商品・サービス"],["subjects","件名"]].map(([k,l]) => (
+          <button key={k} style={{ ...S.navBtn(activeM === k), color: activeM === k ? "#1a1208" : "#7a5c2e", borderColor: "#c8a96e88" }} onClick={() => setActiveM(k)}>{l}</button>
+        ))}
+      </div>
+
+      {activeM === "company" && (
+        <div>
+          <div style={S.sectionTitle}>発行元情報（請求書・見積書の右上に印字されます）</div>
+          <div style={{ border: "1px solid #e8d9c0", borderRadius: 6, padding: "1rem" }}>
+            {editC ? (
+              <div>
+                {companyFields.map(([k,l]) => (
+                  <div key={k} style={{ marginBottom: 8 }}>
+                    <label style={S.label}>{l}</label>
+                    <input style={S.input} value={company[k] || ""} onChange={(e) => setCompany((c) => ({ ...c, [k]: e.target.value }))} />
+                  </div>
+                ))}
+                <button style={S.btn()} onClick={() => setEditC(false)}>完了</button>
+              </div>
+            ) : (
+              <div style={{ display: "flex", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
+                <div style={{ flex: 1, fontSize: "0.85rem", lineHeight: 1.9, minWidth: 200 }}>
+                  {companyFields.map(([k,l]) => (
+                    <div key={k}><span style={{ color: "#7a5c2e", fontWeight: 700, fontSize: "0.76rem", marginRight: 8 }}>{l.split("（")[0]}</span>{company[k] || <span style={{ color: "#bbb" }}>未設定</span>}</div>
+                  ))}
+                </div>
+                <button style={S.btnSm()} onClick={() => setEditC(true)}>編集</button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {activeM === "clients" && (
+        <div>
+          <div style={S.sectionTitle}>宛先マスター（お客様名・敬称）</div>
+          <SortableTable items={clients} setItems={setClients} fieldKey="name" addLabel="宛先追加" newVal={{ name: "新しい宛先", honorific: "御中" }}
+            extra={{ label: "敬称", width: 90, align: "center", render: (item, editing, update) => editing
+              ? <select style={{ ...S.select, width: 80 }} value={item.honorific || "御中"} onChange={(e) => update(item.id, { honorific: e.target.value })}><option value="御中">御中</option><option value="様">様</option></select>
+              : (item.honorific || "御中") }} />
+        </div>
+      )}
+
+      {activeM === "products" && (
+        <div>
+          <div style={S.sectionTitle}>商品・サービスマスター（請求書・見積書 共通）</div>
+          <SortableTable items={products} setItems={setProducts} fieldKey="name" addLabel="商品追加" newVal={{ name: "新商品", price: 0 }}
+            extra={{ label: "標準単価（税込）", width: 150, align: "right", render: (item, editing, update) => editing
+              ? <input type="number" style={{ ...S.input, textAlign: "right" }} value={item.price} onChange={(e) => update(item.id, { price: Number(e.target.value) })} />
+              : `¥ ${fmt(item.price)}` }} />
+        </div>
+      )}
+
+      {activeM === "subjects" && (
+        <div>
+          <div style={S.sectionTitle}>件名マスター（請求書・見積書 共通）</div>
+          <SortableTable items={subjects} setItems={setSubjects} fieldKey="text" addLabel="件名追加" newVal={{ text: "新しい件名" }} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// MAIN APP
+// ============================================================
+function App() {
+  const [tab,      setTab]      = useState("invoice");
+  const [company,  setCompany]  = useState(() => load(KEYS.company,  initialCompany));
+  const [clients,  setClients]  = useState(() => load(KEYS.clients,  initialClients));
+  const [products, setProducts] = useState(() => load(KEYS.products, initialProducts));
+  const [subjects, setSubjects] = useState(() => load(KEYS.subjects, initialSubjects));
+  const [docs,     setDocs]     = useState(() => load(KEYS.docs,     []));
+  const [trash,    setTrash]    = useState(() => load(KEYS.trash,    []));
+  const [viewDoc,  setViewDoc]  = useState(null);
+  const [printHTML, setPrintHTML] = useState(null);
+  const [toast,    setToast]    = useState(null);
+  const [masterSyncing, setMasterSyncing] = useState(false);
+  const [fbDb,     setFbDb]     = useState(null);
+  const [fbStatus, setFbStatus] = useState("connecting");
+  const unsubDocs  = useRef(null);
+  const unsubTrash = useRef(null);
+
+  const showToast = (text, type = "success") => { setToast({ text, type }); setTimeout(() => setToast(null), 2800); };
+
+  // ── Firebase 初期化 ──
+  useEffect(() => {
+    loadFirebase().then(db => {
+      setFbDb(db);
+      setFbStatus("online");
+      fbGetMasters(db).then(masters => {
+        if (masters.company && masters.company.name) setCompany(masters.company); else fbSetMaster(db, "company", initialCompany);
+        if (masters.clients  && masters.clients.length  > 0) setClients(masters.clients);   else fbSetMaster(db, "clients",  initialClients);
+        if (masters.products && masters.products.length > 0) setProducts(masters.products); else fbSetMaster(db, "products", initialProducts);
+        if (masters.subjects && masters.subjects.length > 0) setSubjects(masters.subjects); else fbSetMaster(db, "subjects", initialSubjects);
+      }).catch((err) => { console.error("マスター取得エラー:", err); setFbStatus("offline"); });
+      const onSubErr = () => setFbStatus("offline");
+      unsubDocs.current  = fbSubscribe(db, COLLECTIONS.docs,  setDocs,  onSubErr);
+      unsubTrash.current = fbSubscribe(db, COLLECTIONS.trash, setTrash, onSubErr);
+    }).catch(() => {
+      setFbStatus("offline");
+      console.warn("Firebase接続失敗。端末内データで動作します。");
+    });
+    return () => { unsubDocs.current?.(); unsubTrash.current?.(); };
+  }, []);
+
+  useEffect(() => { persist(KEYS.company,  company);  }, [company]);
+  useEffect(() => { persist(KEYS.clients,  clients);  }, [clients]);
+  useEffect(() => { persist(KEYS.products, products); }, [products]);
+  useEffect(() => { persist(KEYS.subjects, subjects); }, [subjects]);
+  useEffect(() => { persist(KEYS.docs,     docs);     }, [docs]);
+  useEffect(() => { persist(KEYS.trash,    trash);    }, [trash]);
+
+  const newBlankDoc = (type = "invoice") => ({
+    id: genId(), type,
+    docNumber: formatDocNumber(type, docs),
+    createdAt: today(), dueDate: nextMonthEnd(),
+    clientName: "", honorific: "御中", subject: "", note: "", specialNotes: "",
+    items: BLANK_ITEMS(), discount: 0, discountType: "%", partialPayment: 0, editLog: [],
+  });
+  const [form, setForm] = useState(() => newBlankDoc());
+
+  const isFormDirty = (f) => {
+    if (!f) return false;
+    if (docs.some((d) => d.id === f.id)) return false; // 保存済みの書類を開いているだけなら確認不要
+    if ((f.clientName || "").trim() || (f.subject || "").trim() || (f.note || "").trim() || (f.specialNotes || "").trim()) return true;
+    return (f.items || []).some((it) => (it.name || "").trim());
+  };
+  const handleNew = (type) => {
+    if (isFormDirty(form) && !window.confirm("入力内容が消えますが、新しい書類に切り替えますか？\n\nOK　 ＝ 切り替えて新しい書類を作成\nキャンセル ＝ いまの入力内容をそのまま残す")) return;
+    setForm(newBlankDoc(type));
+    setTab(type);
+    window.scrollTo(0, 0);
+  };
+  const handleEdit = (doc) => {
+    const items = [...(doc.items || [])];
+    while (items.length < 10) items.push(EMPTY_ITEM());
+    setForm({ ...doc, items: items.slice(0, 10), partialPayment: doc.partialPayment || 0, editLog: doc.editLog || [] });
+    setTab(doc.type);
+    setViewDoc(null);
+    window.scrollTo(0, 0);
+  };
+  const setField  = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  const setItem   = (idx, patch) => setForm((f) => ({ ...f, items: f.items.map((it, i) => i === idx ? { ...it, ...patch } : it) }));
+  const clearItem = (idx) => setItem(idx, EMPTY_ITEM());
+
+  // ── 保存（端末内＋クラウド） ──
+  const cloudSave = (doc) => {
+    if (!fbDb) return;
+    fbSaveDoc(fbDb, COLLECTIONS.docs, doc).catch((err) => {
+      console.error("Firebase保存エラー:", err);
+      setFbStatus("offline");
+      alert("⚠️ クラウドへの保存に失敗しました。\nこの書類は端末内には保存されていますが、他の端末には共有されていない可能性があります。\nネット接続を確認して、もう一度保存してください。");
+    });
+  };
+  const saveDoc = () => {
+    const existing = docs.find((d) => d.id === form.id);
+    let newDoc;
+    if (existing) {
+      const changes = detectChanges(existing, form);
+      newDoc = { ...form, editLog: [{ at: nowStr(), changes: changes.length ? changes : ["変更なし（再保存）"] }, ...(form.editLog || [])] };
+    } else {
+      newDoc = { ...form, editLog: [{ at: nowStr(), changes: ["新規作成"] }] };
+    }
+    delete newDoc._fbId;
+    setDocs((prev) => existing ? prev.map((d) => d.id === newDoc.id ? newDoc : d) : [newDoc, ...prev]);
+    setForm(newDoc);
+    cloudSave(newDoc);
+    showToast("✅ 保存が完了しました");
+  };
+  const copyDoc = (src) => {
+    const newNo = formatCopyNumber(src.docNumber, docs);
+    if (!newNo) { alert("この書類は番号形式が違うためコピーできません。"); return; }
+    const newDoc = { ...src, id: genId(), docNumber: newNo, editLog: [{ at: nowStr(), changes: [`コピー作成（元: ${src.docNumber}）`] }] };
+    delete newDoc._fbId;
+    setDocs((prev) => [newDoc, ...prev]);
+    cloudSave(newDoc);
+    handleEdit(newDoc);
+    showToast(`📋 コピーを作成しました（${newNo}）`);
+  };
+  // 見積書 → 請求書に変換（明細・宛先・件名を引き継ぎ、新しい請求書番号で作成）
+  const convertToInvoice = (src) => {
+    if (!confirm(`見積書 ${src.docNumber} の内容で請求書を作成しますか？\n（元の見積書はそのまま残ります）`)) return;
+    const newDoc = {
+      ...src, id: genId(), type: "invoice",
+      docNumber: formatDocNumber("invoice", docs),
+      createdAt: today(), dueDate: nextMonthEnd(),
+      note: "上記の通り、ご請求申し上げます。",
+      partialPayment: 0, sourceDocNo: src.docNumber,
+      editLog: [{ at: nowStr(), changes: [`見積書 ${src.docNumber} から作成`] }],
+    };
+    delete newDoc._fbId;
+    setDocs((prev) => [newDoc, ...prev]);
+    cloudSave(newDoc);
+    handleEdit(newDoc);
+    showToast(`📄 請求書を作成しました（${newDoc.docNumber}）`);
+  };
+  const printPDF = (doc) => setPrintHTML(buildPrintHTML(doc, company));
+
+  const moveToTrash = (id) => {
+    if (!confirm("ゴミ箱に移動しますか？\n（ゴミ箱から元に戻すことができます）")) return;
+    const doc = docs.find((d) => d.id === id);
+    if (!doc) return;
+    const trashed = { ...doc, trashedAt: nowStr() };
+    setDocs((prev) => prev.filter((d) => d.id !== id));
+    setTrash((prev) => [trashed, ...prev]);
+    if (fbDb) { fbDeleteDoc(fbDb, COLLECTIONS.docs, id).catch(console.error); fbSaveDoc(fbDb, COLLECTIONS.trash, trashed).catch(console.error); }
+    if (form.id === id) setForm(newBlankDoc(doc.type));
+  };
+  const restoreFromTrash = (id) => {
+    const doc = trash.find((d) => d.id === id);
+    if (!doc) return;
+    const { trashedAt, ...restored } = doc;
+    setTrash((prev) => prev.filter((d) => d.id !== id));
+    setDocs((prev) => [restored, ...prev]);
+    if (fbDb) { fbDeleteDoc(fbDb, COLLECTIONS.trash, id).catch(console.error); fbSaveDoc(fbDb, COLLECTIONS.docs, restored).catch(console.error); }
+    showToast("↩ 履歴に戻しました");
+  };
+
+  // ── マスター手動同期 ──
+  const pushMasters = async () => {
+    if (!fbDb) { showToast("Firebaseに接続されていません", "error"); return; }
+    setMasterSyncing(true);
+    try {
+      await Promise.all([fbSetMaster(fbDb, "company", company), fbSetMaster(fbDb, "clients", clients), fbSetMaster(fbDb, "products", products), fbSetMaster(fbDb, "subjects", subjects)]);
+      showToast("✅ マスター情報を全端末に反映しました");
+    } catch (e) { showToast("❌ 反映に失敗しました: " + e.message, "error"); }
+    setMasterSyncing(false);
+  };
+  const pullMasters = async () => {
+    if (!fbDb) { showToast("Firebaseに接続されていません", "error"); return; }
+    setMasterSyncing(true);
+    try {
+      const m = await fbGetMasters(fbDb);
+      if (m.company)  setCompany(m.company);
+      if (m.clients)  setClients(m.clients);
+      if (m.products) setProducts(m.products);
+      if (m.subjects) setSubjects(m.subjects);
+      showToast("✅ 最新のマスター情報を取得しました");
+    } catch (e) { showToast("❌ 取得に失敗しました: " + e.message, "error"); }
+    setMasterSyncing(false);
+  };
+
+  // ── バックアップ / リストア ──
+  const handleBackup = () => {
+    const data = { app: "aisanta-invoice", version: 1, exportedAt: new Date().toISOString(), docs, trash, company, clients, products, subjects };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `aisanta-invoice-backup-${today()}.json`; a.click();
+    URL.revokeObjectURL(url);
+  };
+  const handleRestore = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (!confirm("現在のデータをすべてバックアップファイルの内容で上書きします。\nよろしいですか？")) { e.target.value = ""; return; }
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = JSON.parse(ev.target.result);
+        if (data.app !== "aisanta-invoice" || data.version !== 1) throw new Error("このアプリのバックアップファイルではありません");
+        if (data.docs)     { setDocs(data.docs);         if (fbDb) data.docs.forEach((d) => fbSaveDoc(fbDb, COLLECTIONS.docs, d).catch(console.error)); }
+        if (data.trash)    { setTrash(data.trash);       if (fbDb) data.trash.forEach((d) => fbSaveDoc(fbDb, COLLECTIONS.trash, d).catch(console.error)); }
+        if (data.company)  setCompany(data.company);
+        if (data.clients)  setClients(data.clients);
+        if (data.products) setProducts(data.products);
+        if (data.subjects) setSubjects(data.subjects);
+        alert(`✅ リストア完了\n書類: ${(data.docs || []).length}件\nバックアップ日時: ${(data.exportedAt || "").slice(0, 16).replace("T", " ")}\n\n※マスター情報を他の端末にも反映するには「マスター管理 → 📤 全端末に反映」を押してください。`);
+      } catch (err) {
+        alert("❌ リストアに失敗しました。\n正しいバックアップファイルか確認してください。\n" + err.message);
+      }
+      e.target.value = "";
+    };
+    reader.readAsText(file);
+  };
+
+  const isEditTab = tab === "invoice" || tab === "estimate";
+
+  return (
+    <div style={S.app}>
+      <header style={S.header}>
+        <div className="hdr-row">
+          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
+              <span style={{ fontSize: "1.25rem", fontWeight: 900, letterSpacing: "0.14em", color: "#c8a96e", fontFamily: "Georgia, serif", whiteSpace: "nowrap" }}>AI SANTA</span>
+              <span style={{ fontSize: "0.62rem", color: "#c8a96e88", letterSpacing: "0.1em", marginTop: 1 }}>{APP_VERSION}</span>
+            </div>
+            <span style={{ width: 1, height: 28, background: "#c8a96e33" }} />
+            <span style={{ fontSize: "0.78rem", color: "#e8d9c0aa", letterSpacing: "0.05em", whiteSpace: "nowrap" }}>請求書 · 見積書</span>
+            <span style={{ fontSize: "0.68rem", fontWeight: 700, padding: "2px 8px", borderRadius: 10, whiteSpace: "nowrap",
+              background: fbStatus === "online" ? "#2ecc71" : fbStatus === "connecting" ? "#f39c12" : "#e74c3c", color: "#fff" }}>
+              {fbStatus === "online" ? "🟢 同期中" : fbStatus === "connecting" ? "🟡 接続中..." : "🔴 オフライン"}
+            </span>
+          </div>
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <button title="全データをJSONファイルに保存" onClick={handleBackup} style={{ ...S.btnSm("#2d6a9e"), padding: "4px 12px", fontSize: "0.75rem" }}>💾 バックアップ</button>
+            <label title="バックアップJSONを読み込んで全データを復元" style={{ ...S.btnSm("#7a5c2e"), padding: "4px 12px", fontSize: "0.75rem" }}>
+              📂 リストア<input type="file" accept=".json" style={{ display: "none" }} onChange={handleRestore} />
+            </label>
+          </div>
+        </div>
+        <div className="nav-row">
+          <button style={S.navBtn(tab === "invoice")}  onClick={() => handleNew("invoice")}>＋ 請求書</button>
+          <button style={S.navBtn(tab === "estimate")} onClick={() => handleNew("estimate")}>＋ 見積書</button>
+          <span style={{ width: 1, height: 20, background: "#c8a96e33", margin: "0 2px" }} />
+          <button style={S.navBtn(tab === "history")} onClick={() => setTab("history")}>履歴</button>
+          <button style={S.navBtn(tab === "master")}  onClick={() => setTab("master")}>マスター管理</button>
+          <button style={{ ...S.navBtn(tab === "trash"), color: tab === "trash" ? "#1a1208" : "#e8a0a0", borderColor: "#e8a0a066" }} onClick={() => setTab("trash")}>
+            🗑 ゴミ箱{trash.length > 0 ? ` (${trash.length})` : ""}
+          </button>
+        </div>
+      </header>
+
+      <main className="main" style={S.main}>
+        {isEditTab && (
+          <EditPanel form={form} setField={setField} setItem={setItem} clearItem={clearItem}
+            company={company} clients={clients} subjects={subjects} products={products}
+            saveDoc={saveDoc} printPDF={printPDF} onSelectType={handleNew} />
+        )}
+        {tab === "history" && <HistoryPanel docs={docs} onView={setViewDoc} onEdit={handleEdit} onTrash={moveToTrash} />}
+        {tab === "trash"   && <TrashPanel trash={trash} onRestore={restoreFromTrash} />}
+        {tab === "master"  && (
+          <MasterPanel company={company} setCompany={setCompany} clients={clients} setClients={setClients}
+            products={products} setProducts={setProducts} subjects={subjects} setSubjects={setSubjects}
+            onPush={pushMasters} onPull={pullMasters} syncing={masterSyncing} fbStatus={fbStatus} />
+        )}
+      </main>
+
+      {viewDoc && (
+        <DetailModal doc={viewDoc}
+          onClose={() => setViewDoc(null)}
+          onEdit={() => handleEdit(viewDoc)}
+          onCopy={() => { setViewDoc(null); copyDoc(viewDoc); }}
+          onConvert={() => { setViewDoc(null); convertToInvoice(viewDoc); }}
+          onPrint={() => printPDF(viewDoc)} />
+      )}
+
+      {printHTML && (
+        <div style={{ position: "fixed", inset: 0, background: "#000a", zIndex: 2000, display: "flex", flexDirection: "column" }}>
+          <div style={{ background: "#1a1208", color: "#e8d9c0", padding: "10px 16px", display: "flex", alignItems: "center", gap: 12, flexShrink: 0, flexWrap: "wrap" }}>
+            <span style={{ fontWeight: 700, fontSize: "0.95rem", letterSpacing: "0.08em" }}>🖨 PDF プレビュー</span>
+            <span style={{ fontSize: "0.78rem", color: "#c8a96e88" }}>印刷画面で「PDFに保存」を選ぶとPDFになります</span>
+            <div style={{ flex: 1 }} />
+            <button onClick={() => { const f = document.getElementById("pdf-iframe"); if (f) { f.contentWindow.focus(); f.contentWindow.print(); } }}
+              style={{ ...S.btn("#c8a96e") }}>🖨 印刷 / PDFで保存</button>
+            <button onClick={() => setPrintHTML(null)} style={{ background: "transparent", color: "#e8d9c0", border: "1px solid #c8a96e44", borderRadius: 4, padding: "7px 16px", cursor: "pointer", fontWeight: 700, fontSize: "0.9rem", fontFamily: "inherit" }}>✕ 閉じる</button>
+          </div>
+          <iframe id="pdf-iframe" srcDoc={printHTML} style={{ flex: 1, border: "none", background: "#888" }} title="PDF プレビュー" />
+        </div>
+      )}
+
+      {toast && (
+        <div style={{ position: "fixed", bottom: 32, left: "50%", transform: "translateX(-50%)", background: toast.type === "error" ? "#c0392b" : "#2ecc71", color: "#fff", borderRadius: 8, padding: "14px 28px", fontWeight: 700, fontSize: "0.95rem", boxShadow: "0 4px 20px #0004", zIndex: 3000, maxWidth: "90vw", textAlign: "center" }}>
+          {toast.text}
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+  </script>
+</body>
+</html>

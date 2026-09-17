@@ -46,7 +46,7 @@
   <script type="text/babel" data-presets="classic-react">
 const { useState, useEffect, useRef } = React;
 
-const APP_VERSION = "Ver1-002";
+const APP_VERSION = "Ver1-003";
 
 // ============================================================
 // FIREBASE CONFIG（IERと同じプロジェクトに aisanta_ 接頭辞で間借り）
@@ -129,7 +129,15 @@ const initialCompany = {
   name: "AIサンタ", rep: "宮守 洋輔",
   postal: "", address: "", tel: "",
   email: "bpx.snc1980@gmail.com",
-  bank: "", invoiceNo: "",
+  bankName: "", branchName: "", accountType: "普通", accountNo: "", accountHolder: "",
+  bank: "",   // 旧・自由記入欄（互換用。新しい5項目が空のときだけ使う）
+  invoiceNo: "",
+};
+// 振込先の1行表示（銀行名　支店名　種別　番号　名義）
+const bankText = (co) => {
+  const c = co || {};
+  const parts = [c.bankName, c.branchName, c.accountType || (c.accountNo ? "普通" : ""), c.accountNo, c.accountHolder ? "名義：" + c.accountHolder : ""].filter(Boolean);
+  return parts.length ? parts.join("　") : (c.bank || "");
 };
 const initialClients = [];   // 宛先マスター（お客様名）
 const initialProducts = [
@@ -407,7 +415,7 @@ function buildPrintHTML(doc, company) {
   <div style="font-size:0.8rem;font-weight:700;letter-spacing:0.08em;color:${accent};border-left:3px solid ${gold};padding-left:8px;margin-bottom:5px;">特記事項</div>
   <div style="border:1px solid #c8b88a;border-radius:2px;padding:4px 10px;">${noteRows}</div>
 </div>
-${isInv ? `<div style="border:1px solid ${gold};border-radius:2px;padding:8px 14px;font-size:0.82rem;"><span style="font-weight:700;color:${accent};margin-right:12px;">■ お振込先</span><span style="color:#222;">${esc(co.bank) || "（マスター管理で振込先を設定してください）"}</span></div>` : ""}
+<div style="border:1px solid ${gold};border-radius:2px;padding:8px 14px;font-size:0.82rem;"><span style="font-weight:700;color:${accent};margin-right:12px;">■ お振込先</span><span style="color:#222;">${esc(bankText(co)) || "（マスター管理で振込先を設定してください）"}</span></div>
 ${SMART_FIT_SCRIPT}
 </body></html>`;
 }
@@ -636,7 +644,7 @@ function EditPanel({ form, setField, setItem, clearItem, company, clients, subje
           <strong>{company.name}</strong>{company.rep ? `　${company.rep}` : ""}<br />
           {[company.postal, company.address].filter(Boolean).join(" ") || <span style={{ color: "#aaa" }}>（住所未設定）</span>}<br />
           {[company.tel ? "TEL: " + company.tel : "", company.email].filter(Boolean).join(" / ")}<br />
-          {isInv && <span style={{ color: company.bank ? "#7a5c2e" : "#c0392b" }}>振込先: {company.bank || "未設定（マスター管理で設定してください）"}</span>}
+          <span style={{ color: bankText(company) ? "#7a5c2e" : "#c0392b" }}>振込先: {bankText(company) || "未設定（マスター管理 → 発行元情報 で設定してください）"}</span>
         </div>
       </div>
 
@@ -1006,7 +1014,8 @@ function MasterPanel({ company, setCompany, clients, setClients, products, setPr
   const [activeM, setActiveM] = useState("company");
   const [editC, setEditC] = useState(false);
   const disabled = syncing || fbStatus !== "online";
-  const companyFields = [["name","屋号・会社名"],["rep","代表者名"],["postal","郵便番号"],["address","住所"],["tel","TEL"],["email","メール"],["bank","振込先（銀行・支店・口座種別・番号・名義）"],["invoiceNo","インボイス登録番号（登録している場合のみ）"]];
+  const companyFields = [["name","屋号・会社名"],["rep","代表者名"],["postal","郵便番号"],["address","住所"],["tel","TEL"],["email","メール"],["invoiceNo","インボイス登録番号（登録している場合のみ）"]];
+  const bankFields = [["bankName","銀行名（例：福井銀行）"],["branchName","支店名（例：本店営業部）"],["accountType","口座種別"],["accountNo","口座番号"],["accountHolder","口座名義（カナ）"]];
 
   return (
     <div className="card" style={S.card}>
@@ -1044,6 +1053,22 @@ function MasterPanel({ company, setCompany, clients, setClients, products, setPr
                     <input style={S.input} value={company[k] || ""} onChange={(e) => setCompany((c) => ({ ...c, [k]: e.target.value }))} />
                   </div>
                 ))}
+                <div style={{ ...S.sectionTitle, marginTop: 16 }}>🏦 お振込先（見積書・請求書の下部に印字）</div>
+                <div className="g2">
+                  {bankFields.map(([k,l]) => (
+                    <div key={k} style={{ marginBottom: 8 }}>
+                      <label style={S.label}>{l}</label>
+                      {k === "accountType"
+                        ? <select style={S.select} value={company.accountType || "普通"} onChange={(e) => setCompany((c) => ({ ...c, accountType: e.target.value }))}>
+                            <option value="普通">普通</option><option value="当座">当座</option><option value="貯蓄">貯蓄</option>
+                          </select>
+                        : <input style={S.input} value={company[k] || ""} placeholder={k === "accountNo" ? "1234567" : ""} onChange={(e) => setCompany((c) => ({ ...c, [k]: e.target.value }))} />}
+                    </div>
+                  ))}
+                </div>
+                <div style={{ fontSize: "0.78rem", color: "#7a5c2e", background: "#f5f0eb", border: "1px solid #c8a96e55", borderRadius: 4, padding: "8px 12px", marginBottom: 12 }}>
+                  印字イメージ：{bankText(company) || "（未入力）"}
+                </div>
                 <button style={S.btn()} onClick={() => setEditC(false)}>完了</button>
               </div>
             ) : (
@@ -1052,6 +1077,7 @@ function MasterPanel({ company, setCompany, clients, setClients, products, setPr
                   {companyFields.map(([k,l]) => (
                     <div key={k}><span style={{ color: "#7a5c2e", fontWeight: 700, fontSize: "0.76rem", marginRight: 8 }}>{l.split("（")[0]}</span>{company[k] || <span style={{ color: "#bbb" }}>未設定</span>}</div>
                   ))}
+                  <div><span style={{ color: "#7a5c2e", fontWeight: 700, fontSize: "0.76rem", marginRight: 8 }}>お振込先</span>{bankText(company) || <span style={{ color: "#c0392b" }}>未設定（「編集」から入力してください）</span>}</div>
                 </div>
                 <button style={S.btnSm()} onClick={() => setEditC(true)}>編集</button>
               </div>
@@ -1095,7 +1121,7 @@ function MasterPanel({ company, setCompany, clients, setClients, products, setPr
 // ============================================================
 function App() {
   const [tab,      setTab]      = useState("invoice");
-  const [company,  setCompany]  = useState(() => load(KEYS.company,  initialCompany));
+  const [company,  setCompany]  = useState(() => ({ ...initialCompany, ...load(KEYS.company, {}) })); // 旧データに新しい欄（口座など）を補う
   const [clients,  setClients]  = useState(() => load(KEYS.clients,  initialClients));
   const [products, setProducts] = useState(() => load(KEYS.products, initialProducts));
   const [subjects, setSubjects] = useState(() => load(KEYS.subjects, initialSubjects));
@@ -1118,7 +1144,7 @@ function App() {
       setFbDb(db);
       setFbStatus("online");
       fbGetMasters(db).then(masters => {
-        if (masters.company && masters.company.name) setCompany(masters.company); else fbSetMaster(db, "company", initialCompany);
+        if (masters.company && masters.company.name) setCompany({ ...initialCompany, ...masters.company }); else fbSetMaster(db, "company", initialCompany);
         if (masters.clients  && masters.clients.length  > 0) setClients(masters.clients);   else fbSetMaster(db, "clients",  initialClients);
         if (masters.products && masters.products.length > 0) setProducts(masters.products); else fbSetMaster(db, "products", initialProducts);
         if (masters.subjects && masters.subjects.length > 0) setSubjects(masters.subjects); else fbSetMaster(db, "subjects", initialSubjects);
@@ -1261,7 +1287,7 @@ function App() {
     setMasterSyncing(true);
     try {
       const m = await fbGetMasters(fbDb);
-      if (m.company)  setCompany(m.company);
+      if (m.company)  setCompany({ ...initialCompany, ...m.company });
       if (m.clients)  setClients(m.clients);
       if (m.products) setProducts(m.products);
       if (m.subjects) setSubjects(m.subjects);

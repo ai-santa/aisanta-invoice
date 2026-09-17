@@ -46,7 +46,7 @@
   <script type="text/babel" data-presets="classic-react">
 const { useState, useEffect, useRef } = React;
 
-const APP_VERSION = "Ver1-003";
+const APP_VERSION = "Ver1-004";
 
 // ============================================================
 // FIREBASE CONFIG（IERと同じプロジェクトに aisanta_ 接頭辞で間借り）
@@ -136,8 +136,10 @@ const initialCompany = {
 // 振込先の1行表示（銀行名　支店名　種別　番号　名義）
 const bankText = (co) => {
   const c = co || {};
-  const parts = [c.bankName, c.branchName, c.accountType || (c.accountNo ? "普通" : ""), c.accountNo, c.accountHolder ? "名義：" + c.accountHolder : ""].filter(Boolean);
-  return parts.length ? parts.join("　") : (c.bank || "");
+  // 銀行名・口座番号・名義がどれも空なら未設定扱い（種別「普通」だけが出ないように）
+  if (!c.bankName && !c.accountNo && !c.accountHolder) return c.bank || "";
+  const parts = [c.bankName, c.branchName, c.accountType || "普通", c.accountNo, c.accountHolder ? "名義：" + c.accountHolder : ""].filter(Boolean);
+  return parts.join("　");
 };
 const initialClients = [];   // 宛先マスター（お客様名）
 const initialProducts = [
